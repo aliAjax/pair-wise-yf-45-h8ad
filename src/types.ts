@@ -1,6 +1,8 @@
 export type Role = "制片" | "导演" | "演员统筹" | "场记";
-export type SceneStatus = "草稿" | "已确认" | "拍摄中" | "已完成";
-export type ConflictType = "演员档期" | "场地占用" | "器材借用" | "转场时间";
+export type SceneStatus = "草稿" | "已确认" | "拍摄中" | "已完成" | "待核对";
+export type ConflictType = "演员档期" | "场地占用" | "器材借用" | "转场时间" | "回执异常";
+export type ReceiptType = "场地" | "器材";
+export type ReceiptStatus = "有效" | "作废";
 
 export interface Talent {
   id: string;
@@ -30,6 +32,20 @@ export interface Scene {
   equipmentIds: string[];
   status: SceneStatus;
   locked: boolean;
+  venueReceiptId?: string;
+  equipmentReceiptIds: string[];
+}
+
+export interface Receipt {
+  id: string;
+  code: string;
+  type: ReceiptType;
+  resourceId: string;
+  sceneId: string;
+  validFrom: string;
+  validTo: string;
+  status: ReceiptStatus;
+  issuedAt: string;
 }
 
 export interface Conflict {

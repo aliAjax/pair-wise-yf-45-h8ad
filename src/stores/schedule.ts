@@ -1,7 +1,7 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import dayjs from "dayjs";
-import type { Conflict, Equipment, HistoryEntry, Location, OfflineDraft, Role, Scene, SceneStatus, Talent, Version } from "../types";
+import type { Conflict, Equipment, HistoryEntry, Location, OfflineDraft, Receipt, ReceiptType, Role, Scene, SceneStatus, Talent, Version } from "../types";
 
 const STORAGE_KEY = "pair-wise-yf-45/schedule-v1";
 const DRAFT_KEY = "pair-wise-yf-45/offline-draft";
@@ -27,17 +27,36 @@ const equipment: Equipment[] = [
 ];
 
 const seedScenes: Scene[] = [
-  { id: "s1", code: "A-012", title: "码头交接", day: "2026-10-08", start: "08:00", end: "11:30", talentIds: ["t1", "t3"], locationId: "l1", equipmentIds: ["e1", "e3"], status: "已确认", locked: false },
-  { id: "s2", code: "A-013", title: "厂房追逐", day: "2026-10-08", start: "10:30", end: "13:00", talentIds: ["t1", "t2"], locationId: "l1", equipmentIds: ["e2", "e4"], status: "草稿", locked: false },
-  { id: "s3", code: "B-021", title: "候车厅告别", day: "2026-10-09", start: "15:00", end: "18:30", talentIds: ["t2", "t3"], locationId: "l3", equipmentIds: ["e1"], status: "草稿", locked: false }
+  { id: "s1", code: "A-012", title: "码头交接", day: "2026-10-08", start: "08:00", end: "11:30", talentIds: ["t1", "t3"], locationId: "l1", equipmentIds: ["e1", "e3"], status: "已确认", locked: false, venueReceiptId: "r1", equipmentReceiptIds: ["r2", "r3"] },
+  { id: "s2", code: "A-013", title: "厂房追逐", day: "2026-10-08", start: "10:30", end: "13:00", talentIds: ["t1", "t2"], locationId: "l1", equipmentIds: ["e2", "e4"], status: "草稿", locked: false, equipmentReceiptIds: [] },
+  { id: "s3", code: "B-021", title: "候车厅告别", day: "2026-10-09", start: "15:00", end: "18:30", talentIds: ["t2", "t3"], locationId: "l3", equipmentIds: ["e1"], status: "草稿", locked: false, equipmentReceiptIds: [] }
+];
+
+const seedReceipts: Receipt[] = [
+  { id: "r1", code: "V-20261008-001", type: "场地", resourceId: "l1", sceneId: "s1", validFrom: dayjs("2026-10-08T08:00").toISOString(), validTo: dayjs("2026-10-08T11:30").toISOString(), status: "有效", issuedAt: dayjs("2026-10-07T10:00").toISOString() },
+  { id: "r2", code: "E-20261008-001", type: "器材", resourceId: "e1", sceneId: "s1", validFrom: dayjs("2026-10-08T08:00").toISOString(), validTo: dayjs("2026-10-08T11:30").toISOString(), status: "有效", issuedAt: dayjs("2026-10-07T10:05").toISOString() },
+  { id: "r3", code: "E-20261008-002", type: "器材", resourceId: "e3", sceneId: "s1", validFrom: dayjs("2026-10-08T08:00").toISOString(), validTo: dayjs("2026-10-08T11:30").toISOString(), status: "有效", issuedAt: dayjs("2026-10-07T10:06").toISOString() }
 ];
 
 function readScenes(): Scene[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw).scenes as Scene[] : structuredClone(seedScenes);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return (parsed.scenes as Scene[]).map((scene) => ({ ...scene, equipmentReceiptIds: scene.equipmentReceiptIds ?? [] }));
+    }
+    return structuredClone(seedScenes);
   } catch {
     return structuredClone(seedScenes);
+  }
+}
+
+function readReceipts(): Receipt[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw).receipts as Receipt[]) : structuredClone(seedReceipts);
+  } catch {
+    return structuredClone(seedReceipts);
   }
 }
 
@@ -72,8 +91,16 @@ function shared(a: string[], b: string[]) {
   return a.some((value) => b.includes(value));
 }
 
+function sceneWindow(scene: Scene) {
+  return {
+    from: dayjs(`${scene.day}T${scene.start}`),
+    to: dayjs(`${scene.day}T${scene.end}`)
+  };
+}
+
 export const useScheduleStore = defineStore("schedule", () => {
   const scenes = ref<Scene[]>(readScenes());
+  const receipts = ref<Receipt[]>(readReceipts());
   const history = ref<HistoryEntry[]>(readHistory());
   const versions = ref<Version[]>(readVersions());
   const role = ref<Role>("制片");
@@ -84,6 +111,46 @@ export const useScheduleStore = defineStore("schedule", () => {
   const talentNames = (ids: string[]) => ids.map((id) => talents.find((item) => item.id === id)?.name ?? id);
   const locationName = (id: string) => locations.find((item) => item.id === id)?.name ?? id;
   const equipmentNames = (ids: string[]) => ids.map((id) => equipment.find((item) => item.id === id)?.name ?? id);
+  const equipmentName = (id: string) => equipment.find((item) => item.id === id)?.name ?? id;
+
+  const receiptById = (id?: string) => receipts.value.find((item) => item.id === id);
+  const venueReceiptOf = (scene: Scene) => receiptById(scene.venueReceiptId);
+  const equipmentReceiptOf = (scene: Scene, equipmentId: string) =>
+    receipts.value.find((item) => item.type === "器材" && item.sceneId === scene.id && item.resourceId === equipmentId && scene.equipmentReceiptIds.includes(item.id));
+
+  function receiptCoversScene(receipt: Receipt | undefined, scene: Scene, resourceId: string): boolean {
+    if (!receipt || receipt.status !== "有效") return false;
+    if (receipt.resourceId !== resourceId) return false;
+    const { from, to } = sceneWindow(scene);
+    const validFrom = dayjs(receipt.validFrom);
+    const validTo = dayjs(receipt.validTo);
+    return (from.isSame(validFrom) || from.isAfter(validFrom)) && (to.isSame(validTo) || to.isBefore(validTo));
+  }
+
+  function sceneReconciled(scene: Scene): boolean {
+    if (scene.status === "拍摄中" || scene.status === "已完成") return true;
+    const venue = venueReceiptOf(scene);
+    if (!receiptCoversScene(venue, scene, scene.locationId)) return false;
+    for (const equipmentId of scene.equipmentIds) {
+      if (!receiptCoversScene(equipmentReceiptOf(scene, equipmentId), scene, equipmentId)) return false;
+    }
+    return true;
+  }
+
+  function receiptIssues(scene: Scene): string[] {
+    const issues: string[] = [];
+    const venue = venueReceiptOf(scene);
+    if (!receiptCoversScene(venue, scene, scene.locationId)) {
+      issues.push(venue ? "场地回执已失效" : "缺场地回执");
+    }
+    for (const equipmentId of scene.equipmentIds) {
+      const receipt = equipmentReceiptOf(scene, equipmentId);
+      if (!receiptCoversScene(receipt, scene, equipmentId)) {
+        issues.push(`${equipmentName(equipmentId) ?? equipmentId}${receipt ? "回执已失效" : "缺回执"}`);
+      }
+    }
+    return issues;
+  }
 
   const conflicts = computed<Conflict[]>(() => {
     const result: Conflict[] = [];
@@ -100,6 +167,18 @@ export const useScheduleStore = defineStore("schedule", () => {
         if (a.locationId !== b.locationId && minutes(b.start) - minutes(a.end) < 30) result.push({ id: `${id}:transfer`, type: "转场时间", sceneIds: [a.id, b.id], message: "两个场地之间转场时间不足30分钟", severity: "中" });
       }
     }
+    for (const scene of scenes.value) {
+      if (scene.status === "拍摄中" || scene.status === "已完成") continue;
+      if (scene.status === "草稿") continue;
+      if (sceneReconciled(scene)) continue;
+      result.push({
+        id: `receipt:${scene.id}`,
+        type: "回执异常",
+        sceneIds: [scene.id],
+        message: `${scene.code} ${receiptIssues(scene).join("、")}`,
+        severity: "高"
+      });
+    }
     return result;
   });
 
@@ -111,13 +190,13 @@ export const useScheduleStore = defineStore("schedule", () => {
   }
 
   function persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ scenes: scenes.value, history: history.value, versions: versions.value }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ scenes: scenes.value, history: history.value, versions: versions.value, receipts: receipts.value }));
   }
 
-  watch([scenes, history, versions], persist, { deep: true });
+  watch([scenes, history, versions, receipts], persist, { deep: true });
 
-  function addScene(input: Omit<Scene, "id" | "status" | "locked">) {
-    scenes.value.push({ ...input, id: crypto.randomUUID(), status: "草稿", locked: false });
+  function addScene(input: Omit<Scene, "id" | "status" | "locked" | "venueReceiptId" | "equipmentReceiptIds">) {
+    scenes.value.push({ ...input, id: crypto.randomUUID(), status: "草稿", locked: false, equipmentReceiptIds: [] });
     log("新增场次", `${input.code} ${input.title}`);
   }
 
@@ -152,13 +231,15 @@ export const useScheduleStore = defineStore("schedule", () => {
     const version = versions.value.find((item) => item.id === id);
     if (!version) return;
     scenes.value = structuredClone(version.scenes);
+    reconcileAll();
     log("恢复版本", version.name);
   }
 
   function saveDraft() {
-    draft.value = { scenes: structuredClone(scenes.value), savedAt: new Date().toISOString() };
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft.value));
-    log("保存离线草稿", dayjs(draft.value.savedAt).format("MM-DD HH:mm"));
+    const value: OfflineDraft = { scenes: structuredClone(scenes.value), savedAt: new Date().toISOString() };
+    draft.value = value;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(value));
+    log("保存离线草稿", dayjs(value.savedAt).format("MM-DD HH:mm"));
   }
 
   function loadDraft() {
@@ -172,10 +253,11 @@ export const useScheduleStore = defineStore("schedule", () => {
 
   function syncDraft() {
     if (!draft.value) return;
+    const count = draft.value.scenes.length;
     scenes.value = structuredClone(draft.value.scenes);
-    log("同步离线草稿", `同步 ${draft.value.scenes.length} 个场次`);
     draft.value = null;
     localStorage.removeItem(DRAFT_KEY);
+    log("同步离线草稿", `同步 ${count} 个场次`);
   }
 
   function exempt(id: string) {
@@ -187,5 +269,145 @@ export const useScheduleStore = defineStore("schedule", () => {
     online.value = value;
   }
 
-  return { scenes, sortedScenes, conflicts, history, versions, role, exemptions, online, draft, talents, locations, equipment, talentNames, equipmentNames, locationName, addScene, updateStatus, toggleLock, moveScene, snapshot, restore, saveDraft, loadDraft, syncDraft, exempt, setOnline };
+  function nextReceiptCode(type: ReceiptType): string {
+    const prefix = type === "场地" ? "V" : "E";
+    const date = dayjs().format("YYYYMMDD");
+    const count = receipts.value.filter((item) => item.type === type && dayjs(item.issuedAt).format("YYYYMMDD") === date).length + 1;
+    return `${prefix}-${date}-${String(count).padStart(3, "0")}`;
+  }
+
+  function voidReceiptsForScene(scene: Scene) {
+    for (const receipt of receipts.value) {
+      if (receipt.sceneId === scene.id && receipt.status === "有效") {
+        receipt.status = "作废";
+      }
+    }
+    scene.venueReceiptId = undefined;
+    scene.equipmentReceiptIds = [];
+  }
+
+  function issueReceipt(sceneId: string, type: ReceiptType, resourceId?: string) {
+    const scene = scenes.value.find((item) => item.id === sceneId);
+    if (!scene) return;
+    const targetResource = type === "场地" ? scene.locationId : resourceId;
+    if (!targetResource) return;
+    for (const receipt of receipts.value) {
+      if (receipt.sceneId === sceneId && receipt.type === type && receipt.resourceId === targetResource && receipt.status === "有效") {
+        receipt.status = "作废";
+      }
+    }
+    const { from, to } = sceneWindow(scene);
+    const receipt: Receipt = {
+      id: crypto.randomUUID(),
+      code: nextReceiptCode(type),
+      type,
+      resourceId: targetResource,
+      sceneId,
+      validFrom: from.toISOString(),
+      validTo: to.toISOString(),
+      status: "有效",
+      issuedAt: new Date().toISOString()
+    };
+    receipts.value.push(receipt);
+    if (type === "场地") {
+      scene.venueReceiptId = receipt.id;
+    } else {
+      scene.equipmentReceiptIds.push(receipt.id);
+    }
+    if (scene.status === "待核对" && sceneReconciled(scene)) {
+      scene.status = "已确认";
+    }
+    const resourceLabel = type === "场地" ? locationName(targetResource) : equipmentName(targetResource);
+    log("开具回执", `${scene.code} ${type}回执 ${receipt.code}（${resourceLabel}）`);
+  }
+
+  function referencingScenes(receipt: Receipt): Scene[] {
+    return scenes.value.filter((scene) =>
+      scene.venueReceiptId === receipt.id || scene.equipmentReceiptIds.includes(receipt.id)
+    );
+  }
+
+  function cancelReceipt(receiptId: string) {
+    const receipt = receipts.value.find((item) => item.id === receiptId);
+    if (!receipt || receipt.status === "作废") return;
+    receipt.status = "作废";
+    for (const scene of referencingScenes(receipt)) {
+      if (scene.status === "拍摄中" || scene.status === "已完成") continue;
+      if (scene.venueReceiptId === receipt.id) scene.venueReceiptId = undefined;
+      scene.equipmentReceiptIds = scene.equipmentReceiptIds.filter((id) => id !== receipt.id);
+      scene.status = "待核对";
+    }
+    log("撤档作废", `${receipt.code} 已作废，引用场次退回待核对`);
+  }
+
+  function rescheduleReceipt(receiptId: string, validFrom: string, validTo: string) {
+    const receipt = receipts.value.find((item) => item.id === receiptId);
+    if (!receipt || receipt.status === "作废") return;
+    const oldCode = receipt.code;
+    receipt.status = "作废";
+    const next: Receipt = {
+      ...receipt,
+      id: crypto.randomUUID(),
+      code: nextReceiptCode(receipt.type),
+      validFrom: dayjs(validFrom).toISOString(),
+      validTo: dayjs(validTo).toISOString(),
+      status: "有效",
+      issuedAt: new Date().toISOString()
+    };
+    receipts.value.push(next);
+    for (const scene of referencingScenes(receipt)) {
+      if (scene.status === "拍摄中" || scene.status === "已完成") continue;
+      if (receipt.type === "场地" && scene.venueReceiptId === receipt.id) {
+        scene.venueReceiptId = next.id;
+      }
+      if (receipt.type === "器材" && scene.equipmentReceiptIds.includes(receipt.id)) {
+        scene.equipmentReceiptIds = scene.equipmentReceiptIds.map((id) => (id === receipt.id ? next.id : id));
+      }
+      scene.status = "待核对";
+    }
+    log("改期换回执", `${oldCode} → ${next.code}，引用场次退回待核对`);
+  }
+
+  function updateScene(id: string, input: Pick<Scene, "code" | "title" | "day" | "start" | "end" | "locationId" | "talentIds" | "equipmentIds">) {
+    const scene = scenes.value.find((item) => item.id === id);
+    if (!scene || scene.locked) return;
+    if (scene.status === "拍摄中" || scene.status === "已完成") return;
+    const changed = scene.day !== input.day || scene.start !== input.start || scene.end !== input.end || scene.locationId !== input.locationId || scene.equipmentIds.join("|") !== input.equipmentIds.join("|");
+    Object.assign(scene, input);
+    if (changed) {
+      voidReceiptsForScene(scene);
+      if (scene.status === "已确认") scene.status = "待核对";
+      log("变更场次", `${scene.code} 时间/场地/器材变更，旧回执作废`);
+    } else {
+      log("更新场次", `${scene.code} ${scene.title}`);
+    }
+  }
+
+  function reconcileScene(id: string) {
+    const scene = scenes.value.find((item) => item.id === id);
+    if (!scene) return;
+    if (scene.status === "待核对" && sceneReconciled(scene)) {
+      scene.status = "已确认";
+      log("对账通过", `${scene.code} 回执齐全，恢复已确认`);
+    }
+  }
+
+  function reconcileAll() {
+    let fixed = 0;
+    for (const scene of scenes.value) {
+      if (scene.status === "拍摄中" || scene.status === "已完成") continue;
+      if (scene.status === "草稿") continue;
+      const ok = sceneReconciled(scene);
+      if (ok && scene.status === "待核对") {
+        scene.status = "已确认";
+        fixed += 1;
+      } else if (!ok && scene.status === "已确认") {
+        scene.status = "待核对";
+        fixed += 1;
+      }
+    }
+    if (fixed) log("重新对账", `${fixed} 个场次状态已修正`);
+  }
+
+  return { scenes, sortedScenes, conflicts, history, versions, role, exemptions, online, draft, talents, locations, equipment, receipts, talentNames, equipmentNames, equipmentName, locationName, sceneReconciled, receiptIssues, receiptById, venueReceiptOf, equipmentReceiptOf, addScene, updateScene, updateStatus, toggleLock, moveScene, snapshot, restore, saveDraft, loadDraft, syncDraft, exempt, setOnline, issueReceipt, cancelReceipt, rescheduleReceipt, reconcileScene, reconcileAll };
 });

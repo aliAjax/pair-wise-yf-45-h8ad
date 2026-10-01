@@ -21,7 +21,10 @@ const schema = toTypedSchema(z.object({
 }));
 const { errors, validate } = useForm({ validationSchema: schema });
 const editable = computed(() => store.role === "制片" || store.role === "导演");
-const currentStatus = (status: string) => status as SceneStatus;
+const nextStatus: Record<string, SceneStatus> = { "草稿": "已确认", "已确认": "拍摄中", "拍摄中": "已完成", "已完成": "已完成" };
+
+const editing = ref<Scene | null>(null);
+const editForm = reactive({ code: "", title: "", day: "", start: "", end: "", locationId: "", talentIds: [] as string[], equipmentIds: [] as string[] });
 
 onMounted(() => store.loadDraft());
 
@@ -38,6 +41,24 @@ function drop(index: number) {
   if (dragging.value !== null && editable.value) store.moveScene(dragging.value, index);
   dragging.value = null;
 }
+
+function startEdit(scene: Scene) {
+  editing.value = scene;
+  Object.assign(editForm, { code: scene.code, title: scene.title, day: scene.day, start: scene.start, end: scene.end, locationId: scene.locationId, talentIds: [...scene.talentIds], equipmentIds: [...scene.equipmentIds] });
+}
+
+function saveEdit() {
+  if (!editing.value) return;
+  store.updateScene(editing.value.id, { ...editForm, talentIds: [...editForm.talentIds], equipmentIds: [...editForm.equipmentIds] });
+  editing.value = null;
+}
+
+function venueReceipt(scene: Scene) {
+  const linked = store.receipts.find((item) => item.type === "场地" && item.sceneId === scene.id && scene.venueReceiptId === item.id);
+  if (linked) return linked;
+  const all = store.receipts.filter((item) => item.type === "场地" && item.sceneId === scene.id);
+  return all.length ? all[all.length - 1] : undefined;
+}
 </script>
 
 <template>
@@ -45,7 +66,7 @@ function drop(index: number) {
     <div class="metrics">
       <article class="metric"><span>通告场次</span><strong>{{ store.scenes.length }}</strong></article>
       <article class="metric"><span>待处理冲突</span><strong>{{ store.conflicts.length }}</strong></article>
-      <article class="metric"><span>已确认</span><strong>{{ store.scenes.filter((item: Scene) => item.status === '已确认').length }}</strong></article>
+      <article class="metric"><span>待核对</span><strong>{{ store.scenes.filter((item: Scene) => item.status === '待核对').length }}</strong></article>
       <article class="metric"><span>版本快照</span><strong>{{ store.versions.length }}</strong></article>
     </div>
     <div v-if="store.draft" class="draft-banner">
@@ -70,21 +91,49 @@ function drop(index: number) {
       <section class="panel">
         <div class="panel-head"><div><h2>当日通告顺序</h2><small class="muted">拖拽调整拍摄顺序，版本快照后可随时恢复</small></div><button class="primary" :disabled="!editable" @click="store.snapshot()">保存版本</button></div>
         <div class="scene-list">
-          <article v-for="(scene,index) in store.sortedScenes" :key="scene.id" class="scene" :class="{ locked: scene.locked, dragging: dragging === index }" draggable="true" @dragstart="dragging=index" @dragover.prevent @drop="drop(index)">
+          <article v-for="(scene,index) in store.sortedScenes" :key="scene.id" class="scene" :class="{ locked: scene.locked, dragging: dragging === index, pending: scene.status === '待核对' }" draggable="true" @dragstart="dragging=index" @dragover.prevent @drop="drop(index)">
             <b>{{ index + 1 }}</b>
             <div class="scene-code">{{ scene.code }}</div>
             <div class="scene-title"><b>{{ scene.title }}</b><small>{{ scene.start }}–{{ scene.end }} · {{ store.locationName(scene.locationId) }}</small></div>
             <span class="status" :class="scene.status">{{ scene.status }}</span>
             <div class="actions">
-              <button class="secondary" :disabled="!editable || scene.locked" @click="store.updateStatus(scene.id, currentStatus(scene.status === '草稿' ? '已确认' : scene.status === '已确认' ? '拍摄中' : scene.status === '拍摄中' ? '已完成' : '已完成'))">推进</button>
+              <button class="secondary" :disabled="!editable || scene.locked || scene.status === '待核对' || scene.status === '已完成'" @click="store.updateStatus(scene.id, nextStatus[scene.status])">推进</button>
+              <button class="secondary" :disabled="!editable || scene.locked || scene.status === '拍摄中' || scene.status === '已完成'" @click="startEdit(scene)">编辑</button>
               <button class="secondary" :disabled="!editable" @click="store.toggleLock(scene.id)">{{ scene.locked ? "解锁" : "锁定" }}</button>
             </div>
             <div class="scene-meta wide">
               <small>演员：{{ store.talentNames(scene.talentIds).join("、") || "待定" }} · 器材：{{ store.equipmentNames(scene.equipmentIds).join("、") || "无" }}</small>
             </div>
+            <div class="scene-meta wide">
+              <small class="receipt-line">
+                场地回执：<span :class="{ 'receipt-ok': venueReceipt(scene)?.status === '有效', 'receipt-bad': !venueReceipt(scene) || venueReceipt(scene)?.status === '作废' }">{{ venueReceipt(scene)?.code ?? "未开具" }}</span>
+                <template v-if="scene.status === '待核对'"> · <RouterLink to="/receipts" class="receipt-link">去对账</RouterLink></template>
+              </small>
+            </div>
           </article>
         </div>
       </section>
+    </div>
+
+    <div v-if="editing" class="modal-mask" @click.self="editing = null">
+      <div class="modal">
+        <h3>变更场次 · {{ editing.code }}</h3>
+        <p class="muted">时间、场地或器材一变，旧回执即作废，需重新开具。</p>
+        <div class="form-grid">
+          <label class="field"><span>场次编号</span><input v-model="editForm.code" /></label>
+          <label class="field"><span>场次名称</span><input v-model="editForm.title" /></label>
+          <label class="field"><span>拍摄日</span><input v-model="editForm.day" type="date" /></label>
+          <label class="field"><span>场地</span><select v-model="editForm.locationId"><option v-for="item in store.locations" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+          <label class="field"><span>开始</span><input v-model="editForm.start" type="time" /></label>
+          <label class="field"><span>结束</span><input v-model="editForm.end" type="time" /></label>
+          <label class="field wide"><span>演员档期</span><select v-model="editForm.talentIds" multiple><option v-for="item in store.talents" :key="item.id" :value="item.id">{{ item.name }} · {{ item.role }}</option></select></label>
+          <label class="field wide"><span>器材借用</span><select v-model="editForm.equipmentIds" multiple><option v-for="item in store.equipment" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+        </div>
+        <div class="actions">
+          <button class="primary" @click="saveEdit">保存并作废旧回执</button>
+          <button class="secondary" @click="editing = null">取消</button>
+        </div>
+      </div>
     </div>
   </section>
 </template>
