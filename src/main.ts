@@ -13,6 +13,7 @@ const i18n = createI18n({
   messages: {
     "zh-CN": {
       schedule: "通告编排",
+      receipts: "档期回执",
       conflicts: "冲突中心",
       history: "版本历史",
       save: "保存",
